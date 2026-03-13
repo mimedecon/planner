@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Планер</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,'Times New Roman',serif;background:#F5F0E8;color:#2C2418}
+input,textarea,button{font-family:inherit}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const STORAGE_KEY = "planner-v1";
+
+const SAMPLE = [{
+  id:"p1", title:"Поиск работы", emoji:"🎯",
+  why:"Найти работу, которая даёт удовлетворение и стабильный доход",
+  color:"#C4784A",
+  tasks:[
+    { id:"t1", title:"Создать портфолио", why:"Показать работодателям реальные результаты",
+      status:"in_progress", deadline:"", notes:"Behance или собственный сайт",
+      subtasks:[
+        {id:"s1",title:"Выбрать 3–5 лучших кейсов",done:true,deadline:""},
+        {id:"s2",title:"Описать каждый кейс по структуре",done:false,deadline:""},
+        {id:"s3",title:"Добавить визуалы и метрики",done:false,deadline:""},
+        {id:"s4",title:"Опубликовать на Behance",done:false,deadline:""},
+      ]},
+    { id:"t2", title:"Обновить резюме", why:"Пройти первичный отбор",
+      status:"todo", deadline:"", notes:"",
+      subtasks:[
+        {id:"s5",title:"Актуализировать опыт и навыки",done:false,deadline:""},
+        {id:"s6",title:"Написать сопроводительное письмо",done:false,deadline:""},
+      ]},
+    { id:"t3", title:"Откликнуться на вакансии", why:"Начать диалог с работодателями",
+      status:"todo", deadline:"", notes:"",
+      subtasks:[
+        {id:"s7",title:"Составить shortlist компаний",done:false,deadline:""},
+        {id:"s8",title:"Отправить 10 откликов",done:false,deadline:""},
+      ]},
+  ]
+}];
+
+const uid = () => Math.random().toString(36).substr(2,9);
+
+function load() {
+  try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : SAMPLE; }
+  catch { return SAMPLE; }
+}
+function save(data) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
+}
+
+function deadlineInfo(d) {
+  if (!d) return null;
+  const diff = Math.ceil((new Date(d)-new Date())/86400000);
+  if (diff<0)  return {text:`Просрочено ${Math.abs(diff)} дн.`, u:"overdue"};
+  if (diff===0) return {text:"Сегодня!", u:"today"};
+  if (diff<=2)  return {text:`${diff} дн.`, u:"soon"};
+  return {text:`${diff} дн.`, u:"ok"};
+}
+const UC = {overdue:"#C0392B",today:"#D4956A",soon:"#C4884A",ok:"#7CAF8E"};
+
+function calcProgress(tasks) {
+  const a = tasks.filter(t=>t.status!=="archived");
+  if (!a.length) return 0;
+  return Math.round(a.filter(t=>t.status==="done").length/a.length*100);
+}
+
+function getTodayItems(projects) {
+  const items=[];
+  projects.forEach(proj=>
+    proj.tasks.filter(t=>t.status==="in_progress").forEach(task=>
+      task.subtasks.filter(s=>!s.done).forEach(sub=>items.push({proj,task,sub}))
+    )
+  );
+  items.sort((a,b)=>{
+    const da=a.sub.deadline||a.task.deadline, db=b.sub.deadline||b.task.deadline;
+    if(da&&db) return new Date(da)-new Date(db);
+    return da?-1:db?1:0;
+  });
+  return items;
+}
+
+function getNextStep(project) {
+  const ip=project.tasks.find(t=>t.status==="in_progress");
+  if(ip){const s=ip.subtasks.find(s=>!s.done); return s?`${ip.title} → ${s.title}`:ip.title;}
+  const td=project.tasks.find(t=>t.status==="todo");
+  return td?td.title:"Все задачи выполнены 🎉";
+}
+
+const PALETTE = ["#C4784A","#5A9A70","#4A7EB8","#9B6B9B","#7A6548","#4A9AB0","#B87050","#6A8A6A"];
+const EMOJIS  = ["🎯","💼","📚","🏃","💡","🔧","✍️","🌱","📋","🚀"];
+
+// Inline editable
+function Editable({value, onSave, style, multiline, placeholder}) {
+  const [editing, setEditing] = React.useState(false);
+  const [val, setVal] = React.useState(value);
+  const ref = React.useRef();
+  React.useEffect(()=>{ if(editing&&ref.current) ref.current.focus(); },[editing]);
+  if (!editing) return (
+    <span style={{...style,cursor:"text",display:"block"}} onClick={()=>{setVal(value);setEditing(true);}}>
+      {value||<span style={{opacity:.35}}>{placeholder||"—"}</span>}
+    </span>
+  );
+  const done = ()=>{ if(val.trim()) onSave(val.trim()); setEditing(false); };
+  const p = {ref,value:val,onChange:e=>setVal(e.target.value),onBlur:done,
+    onKeyDown:e=>{if(e.key==="Enter"&&!multiline)done();if(e.key==="Escape")setEditing(false);},
+    style:{...style,border:"none",borderBottom:"2px solid #C4784A",outline:"none",
+           background:"transparent",fontFamily:"inherit",display:"block",width:"100%",
+           resize:"none",boxSizing:"border-box"}};
+  return multiline ? <textarea rows={3} {...p}/> : <input {...p}/>;
+}
+
+// Drag handle
+function Handle({onDragStart}) {
+  return <span draggable onDragStart={onDragStart}
+    style={{cursor:"grab",color:"#C4B5A0",fontSize:17,padding:"0 8px 0 0",
+            userSelect:"none",flexShrink:0}} title="Перетащи для изменения порядка">⠿</span>;
+}
+
+// Main app
+function App() {
+  const [projects, setProjects] = React.useState(load);
+  const [view, setView]         = React.useState("today");
+  const [pid, setPid]           = React.useState(null);
+  const [tid, setTid]           = React.useState(null);
+  const [modal, setModal]       = React.useState(null);
+  const [form, setForm]         = React.useState({});
+  const [confirmCb, setConfirmCb] = React.useState(null);
+  const [confirmMsg, setConfirmMsg] = React.useState("");
+  const [newSub, setNewSub]     = React.useState("");
+  const [showArchive, setShowArchive] = React.useState(false);
+  const [dragSrc, setDragSrc]   = React.useState(null);
+  const [dragTgt, setDragTgt]   = React.useState(null);
+  const [dragType, setDragType] = React.useState(null);
+
+  const up = next => { setProjects(next); save(next); };
+
+  // projects
+  const patchProj = (id,patch) => up(projects.map(p=>p.id===id?{...p,...patch}:p));
+  const addProj   = () => {
+    if(!form.title?.trim()) return;
+    const p={id:uid(),title:form.title.trim(),emoji:form.emoji||"📌",
+             why:form.why||"",color:form.color||PALETTE[0],tasks:[]};
+    up([...projects,p]); setModal(null); setForm({});
+    setPid(p.id); setTid(null); setView("project");
+  };
+  const delProj = id => confirm2("Удалить проект?", ()=>{
+    up(projects.filter(p=>p.id!==id));
+    if(pid===id){setView("projects");setPid(null);setTid(null);}
+  });
+
+  // tasks
+  const addTask = id => {
+    if(!form.title?.trim()) return;
+    const t={id:uid(),title:form.title.trim(),why:form.why||"",
+             status:"todo",deadline:form.deadline||"",notes:"",subtasks:[]};
+    up(projects.map(p=>p.id===id?{...p,tasks:[...p.tasks,t]}:p));
+    setModal(null); setForm({});
+  };
+  const patchTask = (projId,taskId,patch) => up(projects.map(p=>p.id!==projId?p:{
+    ...p, tasks:p.tasks.map(t=>{
+      if(t.id!==taskId) return t;
+      const u={...t,...patch};
+      if(patch.subtasks){
+        const s=patch.subtasks;
+        if(s.length&&s.every(x=>x.done)) u.status="done";
+        else if(s.some(x=>x.done)&&u.status==="todo") u.status="in_progress";
+      }
+      return u;
+    })
+  }));
+  const delTask = (projId,taskId) => confirm2("Удалить задачу?", ()=>{
+    up(projects.map(p=>p.id!==projId?p:{...p,tasks:p.tasks.filter(t=>t.id!==taskId)}));
+    if(tid===taskId) setTid(null);
+  });
+  const archiveTask = (projId,taskId) => { patchTask(projId,taskId,{status:"archived"}); setTid(null); };
+
+  // subtasks
+  const toggleSub = (projId,taskId,subId) => {
+    const task=projects.find(p=>p.id===projId)?.tasks.find(t=>t.id===taskId);
+    if(!task) return;
+    patchTask(projId,taskId,{subtasks:task.subtasks.map(s=>s.id===subId?{...s,done:!s.done}:s)});
+  };
+  const addSubtask = (projId,taskId) => {
+    if(!newSub.trim()) return;
+    const task=projects.find(p=>p.id===projId)?.tasks.find(t=>t.id===taskId);
+    if(!task) return;
+    patchTask(projId,taskId,{subtasks:[...task.subtasks,{id:uid(),title:newSub.trim(),done:false,deadline:""}]});
+    setNewSub("");
+  };
+  const patchSub = (projId,taskId,subId,patch) => {
+    const task=projects.find(p=>p.id===projId)?.tasks.find(t=>t.id===taskId);
+    if(!task) return;
+    patchTask(projId,taskId,{subtasks:task.subtasks.map(s=>s.id===subId?{...s,...patch}:s)});
+  };
+  const delSub = (projId,taskId,subId) => confirm2("Удалить шаг?", ()=>{
+    const task=projects.find(p=>p.id===projId)?.tasks.find(t=>t.id===taskId);
+    if(!task) return;
+    patchTask(projId,taskId,{subtasks:task.subtasks.filter(s=>s.id!==subId)});
+  });
+
+  const confirm2 = (msg,cb) => { setConfirmMsg(msg); setConfirmCb(()=>cb); setModal("confirm"); };
+
+  // drag — tasks
+  const tDragStart = (e,i) => { setDragSrc(i); setDragType("task"); e.dataTransfer.effectAllowed="move"; };
+  const tDragOver  = (e,i) => { e.preventDefault(); setDragTgt(i); };
+  const tDrop      = projId => {
+    if(dragSrc!==null&&dragTgt!==null&&dragSrc!==dragTgt)
+      up(projects.map(p=>{if(p.id!==projId)return p;const ts=[...p.tasks];const[x]=ts.splice(dragSrc,1);ts.splice(dragTgt,0,x);return{...p,tasks:ts};}));
+    setDragSrc(null);setDragTgt(null);setDragType(null);
+  };
+  // drag — subs
+  const sDragStart = (e,i) => { setDragSrc(i); setDragType("sub"); e.dataTransfer.effectAllowed="move"; };
+  const sDragOver  = (e,i) => { e.preventDefault(); setDragTgt(i); };
+  const sDrop      = (projId,taskId) => {
+    if(dragSrc!==null&&dragTgt!==null&&dragSrc!==dragTgt){
+      const task=projects.find(p=>p.id===projId)?.tasks.find(t=>t.id===taskId);
+      if(task){const ss=[...task.subtasks];const[x]=ss.splice(dragSrc,1);ss.splice(dragTgt,0,x);patchTask(projId,taskId,{subtasks:ss});}
+    }
+    setDragSrc(null);setDragTgt(null);setDragType(null);
+  };
+
+  // save snapshot as new HTML file
+  const downloadSnapshot = () => {
+    const snap = JSON.stringify(projects);
+    // grab entire current page html and inject new data
+    const newHtml = document.documentElement.outerHTML
+      .replace(/localStorage\.getItem\(STORAGE_KEY\)/,
+        `(${snap} || localStorage.getItem(STORAGE_KEY))`);
+    // simpler: just generate a fresh page with data baked in
+    const script = document.querySelector('script[type="text/babel"]').textContent;
+    const html = `<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Планер</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"><\/script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"><\/script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,'Times New Roman',serif;background:#F5F0E8;color:#2C2418}input,textarea,button{font-family:inherit}</style>
+</head><body>
+<div id="root"></div>
+<script>window.__SNAPSHOT__=${snap};<\/script>
+<script type="text/babel" data-presets="react">
+const STORAGE_KEY="planner-v1";
+const SAMPLE=window.__SNAPSHOT__;
+${script.replace(/const SAMPLE = \[[\s\S]*?\};\n\nconst uid/,'const uid')}
+<\/script>
+</body></html>`;
+    const blob = new Blob([html],{type:"text/html"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "planner.html";
+    a.click();
+  };
+
+  const proj  = projects.find(p=>p.id===pid);
+  const task  = proj?.tasks.find(t=>t.id===tid);
+  const today = getTodayItems(projects);
+
+  const S = styles;
+
+  return (
+    <div style={S.app}>
+
+      {/* SIDEBAR */}
+      <aside style={S.sidebar}>
+        <div style={S.brand}><span style={S.bMark}>◈</span><span style={S.bName}>Планер</span></div>
+        <nav style={S.nav}>
+          {[["today","☀","Сегодня",today.length||null],["projects","⬡","Проекты",null]].map(([v,ic,lb,bd])=>(
+            <button key={v} style={{...S.navBtn,...(view===v&&!pid?S.navOn:{})}}
+              onClick={()=>{setView(v);setPid(null);setTid(null);}}>
+              <span>{ic}</span>{lb}
+              {bd&&<span style={S.badge}>{bd}</span>}
+            </button>
+          ))}
+        </nav>
+        <div style={S.sLabel}>МОИ ПРОЕКТЫ</div>
+        <div style={S.sScroll}>
+          {projects.map(p=>(
+            <button key={p.id}
+              style={{...S.sItem,...(pid===p.id?{...S.sItemOn,borderLeft:`3px solid ${p.color}`}:{})}}
+              onClick={()=>{setView("project");setPid(p.id);setTid(null);}}>
+              <span>{p.emoji}</span>
+              <span style={S.sName}>{p.title}</span>
+              <span style={{fontSize:11,color:p.color}}>{calcProgress(p.tasks)}%</span>
+            </button>
+          ))}
+        </div>
+        <button style={S.sAddBtn} onClick={()=>{setModal("project");setForm({color:PALETTE[0],emoji:"📌"});}}>
+          + Новый проект
+        </button>
+        <button style={S.sDlBtn} onClick={downloadSnapshot}>
+          ⬇ Скачать копию
+        </button>
+      </aside>
+
+      {/* MAIN */}
+      <main style={S.main}>
+
+        {/* TODAY */}
+        {view==="today"&&(
+          <div style={S.page}>
+            <div style={S.pageHead}>
+              <h1 style={S.h1}>Сегодня</h1>
+              <p style={S.sub}>{new Date().toLocaleDateString("ru-RU",{weekday:"long",day:"numeric",month:"long"})}</p>
+            </div>
+            {today.length===0?(
+              <div style={S.empty}>
+                <div style={{fontSize:36,marginBottom:14,color:"#C4B5A0"}}>✦</div>
+                <p style={{fontSize:18,color:"#8B7355",marginBottom:8}}>Нет активных шагов</p>
+                <p style={{fontSize:14,color:"#A89070"}}>Открой задачу → «В процессе» → добавь шаги</p>
+              </div>
+            ):(
+              <>
+                <p style={{fontSize:13,color:"#A89070",marginBottom:16}}>{today.length} {today.length===1?"шаг":"шага/шагов"} ждут тебя</p>
+                <div style={S.stack}>
+                  {today.map(({proj:pr,task:ta,sub},i)=>{
+                    const dl=deadlineInfo(sub.deadline||ta.deadline);
+                    return (
+                      <div key={i} style={{...S.card,borderLeft:`4px solid ${pr.color}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                          <span style={{fontSize:12,color:"#A89070"}}>{pr.emoji} {pr.title} / {ta.title}</span>
+                          {dl&&<span style={{...S.dl,background:UC[dl.u]+"22",color:UC[dl.u]}}>{dl.text}</span>}
+                        </div>
+                        <div style={{fontSize:17,fontWeight:"bold",marginBottom:8}}>
+                          <span style={{color:pr.color,marginRight:8}}>→</span>{sub.title}
+                        </div>
+                        {ta.why&&<div style={{fontSize:13,color:"#A89070",fontStyle:"italic",marginBottom:12}}><b>Зачем: </b>{ta.why}</div>}
+                        <div style={{display:"flex",gap:10}}>
+                          <button style={{...S.btnPrimary,background:pr.color}} onClick={()=>toggleSub(pr.id,ta.id,sub.id)}>✓ Сделал</button>
+                          <button style={S.btnGhost} onClick={()=>{setView("project");setPid(pr.id);setTid(ta.id);}}>Открыть →</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+            <h2 style={{...S.label,marginTop:40}}>Прогресс</h2>
+            <div style={S.stack}>
+              {projects.map(pr=>{
+                const pct=calcProgress(pr.tasks);
+                return (
+                  <div key={pr.id} style={{...S.card,cursor:"pointer"}} onClick={()=>{setView("project");setPid(pr.id);}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                      <span style={{fontSize:15}}>{pr.emoji} {pr.title}</span>
+                      <span style={{fontWeight:"bold",color:pr.color}}>{pct}%</span>
+                    </div>
+                    <div style={S.bar}><div style={{...S.barFill,width:`${pct}%`,background:pr.color}}/></div>
+                    <div style={{fontSize:12,color:"#A89070",marginTop:6}}>→ {getNextStep(pr)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* PROJECTS LIST */}
+        {view==="projects"&&(
+          <div style={S.page}>
+            <div style={S.pageHead}><h1 style={S.h1}>Все проекты</h1></div>
+            <div style={S.grid}>
+              {projects.map(pr=>{
+                const pct=calcProgress(pr.tasks);
+                return (
+                  <div key={pr.id} style={{...S.projCard,background:pr.color+"15",borderTop:`4px solid ${pr.color}`}}
+                    onClick={()=>{setView("project");setPid(pr.id);}}>
+                    <div style={{fontSize:30,marginBottom:12}}>{pr.emoji}</div>
+                    <div style={{fontSize:18,fontWeight:"bold",marginBottom:6}}>{pr.title}</div>
+                    <div style={{fontSize:12,color:"#5C4A2A",marginBottom:14,lineHeight:1.5}}>{pr.why}</div>
+                    <div style={S.bar}><div style={{...S.barFill,width:`${pct}%`,background:pr.color}}/></div>
+                    <div style={{fontSize:12,color:"#5C4A2A",marginTop:6,marginBottom:4}}>{pct}% выполнено</div>
+                    <div style={{fontSize:12,fontStyle:"italic"}}>→ {getNextStep(pr)}</div>
+                  </div>
+                );
+              })}
+              <div style={S.projCardAdd} onClick={()=>{setModal("project");setForm({color:PALETTE[0],emoji:"📌"});}}>
+                <span style={{fontSize:28}}>+</span><span>Новый проект</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* PROJECT DETAIL */}
+        {view==="project"&&proj&&!tid&&(
+          <div style={S.page}>
+            <button style={S.back} onClick={()=>{setView("projects");setPid(null);}}>← Проекты</button>
+            <div style={S.pageHead}>
+              <div style={{display:"flex",gap:16,alignItems:"flex-start"}}>
+                <span style={{fontSize:44,lineHeight:1}}>{proj.emoji}</span>
+                <div style={{flex:1}}>
+                  <Editable value={proj.title} style={{...S.h1,display:"block"}} onSave={v=>patchProj(pid,{title:v})}/>
+                  <Editable value={proj.why} style={{...S.sub,display:"block"}} placeholder="Добавь цель..." multiline onSave={v=>patchProj(pid,{why:v})}/>
+                </div>
+              </div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:16}}>
+              <div style={S.bar}><div style={{...S.barFill,width:`${calcProgress(proj.tasks)}%`,background:proj.color}}/></div>
+              <span style={{fontSize:20,fontWeight:"bold",color:proj.color,minWidth:44}}>{calcProgress(proj.tasks)}%</span>
+            </div>
+            <div style={{...S.card,borderLeft:`4px solid ${proj.color}`,display:"flex",gap:12,alignItems:"center",marginBottom:28}}>
+              <span style={{fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#A89070",flexShrink:0}}>Следующий шаг</span>
+              <span style={{fontSize:14,fontWeight:"bold"}}>{getNextStep(proj)}</span>
+            </div>
+            <h2 style={S.label}>Задачи</h2>
+            <div onDragOver={e=>e.preventDefault()} onDrop={()=>tDrop(pid)}>
+              {proj.tasks.filter(t=>["in_progress","todo"].includes(t.status)).map(t=>{
+                const ri=proj.tasks.indexOf(t);
+                const dl=deadlineInfo(t.deadline);
+                const done=t.subtasks.filter(s=>s.done).length;
+                const isT=dragType==="task"&&dragTgt===ri;
+                return (
+                  <div key={t.id} onDragOver={e=>tDragOver(e,ri)}
+                    style={{...S.taskRow,...(isT?{outline:"2px dashed #C4784A",outlineOffset:2}:{})}}>
+                    <Handle onDragStart={e=>tDragStart(e,ri)}/>
+                    <div style={{width:10,height:10,borderRadius:"50%",flexShrink:0,
+                      background:t.status==="in_progress"?proj.color:"#C4B5A0"}}/>
+                    <div style={{flex:1,cursor:"pointer"}} onClick={()=>setTid(t.id)}>
+                      <div style={{fontSize:15,fontWeight:"bold"}}>{t.title}</div>
+                      {t.why&&<div style={{fontSize:12,color:"#A89070",marginTop:2}}>{t.why}</div>}
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4,cursor:"pointer"}} onClick={()=>setTid(t.id)}>
+                      {dl&&<span style={{...S.dl,background:UC[dl.u]+"22",color:UC[dl.u]}}>{dl.text}</span>}
+                      <span style={{fontSize:12,color:"#A89070"}}>{done}/{t.subtasks.length}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {proj.tasks.filter(t=>["in_progress","todo"].includes(t.status)).length===0&&
+              <p style={{fontSize:14,color:"#A89070"}}>Нет активных задач.</p>}
+            <button style={S.addRowBtn} onClick={()=>{setModal("task");setForm({});}}>+ Добавить задачу</button>
+            {proj.tasks.some(t=>t.status==="done"||t.status==="archived")&&(
+              <div style={{marginTop:32}}>
+                <button style={{background:"none",border:"none",color:"#A89070",cursor:"pointer",fontSize:13,fontFamily:"inherit",padding:0}}
+                  onClick={()=>setShowArchive(!showArchive)}>
+                  {showArchive?"▾":"▸"} Архив ({proj.tasks.filter(t=>t.status==="done"||t.status==="archived").length})
+                </button>
+                {showArchive&&(
+                  <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
+                    {proj.tasks.filter(t=>t.status==="done"||t.status==="archived").map(t=>(
+                      <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"#F8F2E8",borderRadius:8}}>
+                        <span style={{fontSize:16,color:"#7CAF8E"}}>{t.status==="done"?"✓":"📦"}</span>
+                        <span style={{flex:1,fontSize:14,color:"#8B7355",textDecoration:"line-through",opacity:.7}}>{t.title}</span>
+                        <button style={S.restoreBtn} onClick={()=>patchTask(pid,t.id,{status:"todo"})}>Вернуть</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{marginTop:48,borderTop:"1px solid #EAE0D0",paddingTop:20}}>
+              <button style={S.dangerBtn} onClick={()=>delProj(pid)}>Удалить проект</button>
+            </div>
+          </div>
+        )}
+
+        {/* TASK DETAIL */}
+        {view==="project"&&proj&&tid&&task&&(
+          <div style={S.page}>
+            <button style={S.back} onClick={()=>setTid(null)}>← {proj.title}</button>
+            <div style={S.pageHead}>
+              <Editable value={task.title} style={{...S.h1,display:"block"}} onSave={v=>patchTask(pid,tid,{title:v})}/>
+              <Editable value={task.why} style={{...S.sub,display:"block"}} placeholder="Добавь «зачем»..." multiline onSave={v=>patchTask(pid,tid,{why:v})}/>
+            </div>
+            <div style={{display:"flex",gap:32,marginBottom:24,flexWrap:"wrap"}}>
+              <div>
+                <div style={S.label}>Статус</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {[["todo","Не начато"],["in_progress","В процессе"],["done","Готово"]].map(([s,l])=>(
+                    <button key={s}
+                      style={{...S.statusBtn,...(task.status===s?{background:proj.color,color:"#fff",border:`2px solid ${proj.color}`}:{})}}
+                      onClick={()=>patchTask(pid,tid,{status:s})}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div style={S.label}>Дедлайн</div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <input type="date" style={S.dateInput} value={task.deadline||""} onChange={e=>patchTask(pid,tid,{deadline:e.target.value})}/>
+                  {(()=>{const dl=deadlineInfo(task.deadline);return dl?<span style={{...S.dl,background:UC[dl.u]+"22",color:UC[dl.u]}}>{dl.text}</span>:null;})()}
+                </div>
+              </div>
+            </div>
+            <div style={{background:"#FDFAF4",borderRadius:10,padding:"16px 18px",marginBottom:24,border:"1px solid #EAE0D0"}}>
+              <div style={S.label}>Заметки</div>
+              <Editable value={task.notes} style={{fontSize:14,color:"#5C4A2A",lineHeight:1.6,marginTop:8,width:"100%",display:"block"}}
+                placeholder="Добавь заметку, ссылку или контакт..." multiline onSave={v=>patchTask(pid,tid,{notes:v})}/>
+            </div>
+            <div style={S.label}>Шаги</div>
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:10}}
+              onDragOver={e=>e.preventDefault()} onDrop={()=>sDrop(pid,tid)}>
+              {task.subtasks.map((sub,idx)=>{
+                const dl=deadlineInfo(sub.deadline);
+                const isT=dragType==="sub"&&dragTgt===idx;
+                return (
+                  <div key={sub.id} onDragOver={e=>sDragOver(e,idx)}
+                    style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 14px",
+                      background:sub.done?"#F8F8F4":"#fff",borderRadius:8,border:"1px solid #EAE0D0",
+                      ...(isT?{outline:"2px dashed #C4784A",outlineOffset:2}:{})}}>
+                    <Handle onDragStart={e=>sDragStart(e,idx)}/>
+                    <div style={{width:22,height:22,borderRadius:6,flexShrink:0,marginTop:2,cursor:"pointer",
+                      display:"flex",alignItems:"center",justifyContent:"center",
+                      border:`2px solid ${sub.done?proj.color:"#C4B5A0"}`,
+                      background:sub.done?proj.color:"transparent"}}
+                      onClick={()=>toggleSub(pid,tid,sub.id)}>
+                      {sub.done&&<span style={{color:"#fff",fontSize:13,fontWeight:"bold"}}>✓</span>}
+                    </div>
+                    <div style={{flex:1}}>
+                      <Editable value={sub.title}
+                        style={{fontSize:14,color:"#2C2418",lineHeight:1.4,...(sub.done?{textDecoration:"line-through",opacity:.45}:{})}}
+                        onSave={v=>patchSub(pid,tid,sub.id,{title:v})}/>
+                      <div style={{display:"flex",alignItems:"center",gap:6,marginTop:5}}>
+                        <span style={{fontSize:11,opacity:.4}}>📅</span>
+                        <input type="date" style={{padding:"3px 8px",border:"1px solid #D8CCBA",borderRadius:6,fontSize:12,fontFamily:"inherit",background:"transparent",color:"#5C4A2A",outline:"none"}}
+                          value={sub.deadline||""} onChange={e=>patchSub(pid,tid,sub.id,{deadline:e.target.value})}/>
+                        {dl&&<span style={{...S.dl,background:UC[dl.u]+"22",color:UC[dl.u]}}>{dl.text}</span>}
+                      </div>
+                    </div>
+                    <button style={{background:"none",border:"none",color:"#C4B5A0",cursor:"pointer",fontSize:14,padding:"2px 4px"}}
+                      onClick={()=>delSub(pid,tid,sub.id)}>✕</button>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{display:"flex",gap:10,marginTop:12,marginBottom:28}}>
+              <input style={S.addSubInput} placeholder="Добавить шаг..."
+                value={newSub} onChange={e=>setNewSub(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter")addSubtask(pid,tid);}}/>
+              <button style={{...S.btnPrimary,background:proj.color}} onClick={()=>addSubtask(pid,tid)}>Добавить</button>
+            </div>
+            <div style={{borderTop:"1px solid #EAE0D0",paddingTop:20,display:"flex",gap:12}}>
+              <button style={{padding:"10px 18px",background:"#F0E8D8",border:"none",borderRadius:8,color:"#8B7355",cursor:"pointer",fontSize:13}}
+                onClick={()=>archiveTask(pid,tid)}>📦 В архив</button>
+              <button style={S.dangerBtn} onClick={()=>delTask(pid,tid)}>Удалить задачу</button>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* MODALS */}
+      {modal==="project"&&(
+        <div style={S.overlay} onClick={()=>setModal(null)}>
+          <div style={S.modal} onClick={e=>e.stopPropagation()}>
+            <h2 style={S.modalTitle}>Новый проект</h2>
+            <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+              {EMOJIS.map(e=>(
+                <span key={e} style={{fontSize:22,cursor:"pointer",padding:6,borderRadius:8,
+                  border:`2px solid ${form.emoji===e?"#C4784A":"transparent"}`,
+                  background:form.emoji===e?"#FFF0E0":"transparent"}}
+                  onClick={()=>setForm({...form,emoji:e})}>{e}</span>
+              ))}
+            </div>
+            <input style={S.input} placeholder="Название проекта" autoFocus
+              value={form.title||""} onChange={e=>setForm({...form,title:e.target.value})}
+              onKeyDown={e=>{if(e.key==="Enter")addProj();}}/>
+            <textarea style={S.textarea} placeholder="Зачем этот проект? Какова цель?"
+              value={form.why||""} onChange={e=>setForm({...form,why:e.target.value})}/>
+            <div style={{display:"flex",gap:10,marginBottom:20,flexWrap:"wrap"}}>
+              {PALETTE.map(c=>(
+                <div key={c} style={{width:26,height:26,borderRadius:"50%",background:c,cursor:"pointer",
+                  border:`3px solid ${form.color===c?"#2C2418":"transparent"}`}}
+                  onClick={()=>setForm({...form,color:c})}/>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:12,justifyContent:"flex-end"}}>
+              <button style={S.cancelBtn} onClick={()=>setModal(null)}>Отмена</button>
+              <button style={{...S.confirmBtn,background:form.color||PALETTE[0]}} onClick={addProj}>Создать</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modal==="task"&&proj&&(
+        <div style={S.overlay} onClick={()=>setModal(null)}>
+          <div style={S.modal} onClick={e=>e.stopPropagation()}>
+            <h2 style={S.modalTitle}>Новая задача</h2>
+            <input style={S.input} placeholder="Название задачи" autoFocus
+              value={form.title||""} onChange={e=>setForm({...form,title:e.target.value})}
+              onKeyDown={e=>{if(e.key==="Enter")addTask(pid);}}/>
+            <textarea style={S.textarea} placeholder="Зачем эта задача?"
+              value={form.why||""} onChange={e=>setForm({...form,why:e.target.value})}/>
+            <label style={{fontSize:12,color:"#8B7355",marginBottom:6,display:"block"}}>Дедлайн (необязательно)</label>
+            <input type="date" style={{...S.input,marginBottom:20}}
+              value={form.deadline||""} onChange={e=>setForm({...form,deadline:e.target.value})}/>
+            <div style={{display:"flex",gap:12,justifyContent:"flex-end"}}>
+              <button style={S.cancelBtn} onClick={()=>setModal(null)}>Отмена</button>
+              <button style={{...S.confirmBtn,background:proj.color}} onClick={()=>addTask(pid)}>Добавить</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modal==="confirm"&&(
+        <div style={S.overlay} onClick={()=>setModal(null)}>
+          <div style={S.modal} onClick={e=>e.stopPropagation()}>
+            <h2 style={S.modalTitle}>Подтвердить</h2>
+            <p style={{color:"#5C4A2A",marginBottom:24}}>{confirmMsg}</p>
+            <div style={{display:"flex",gap:12,justifyContent:"flex-end"}}>
+              <button style={S.cancelBtn} onClick={()=>setModal(null)}>Отмена</button>
+              <button style={{...S.confirmBtn,background:"#C0392B"}} onClick={()=>{confirmCb();setModal(null);}}>Удалить</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const styles = {
+  app:{display:"flex",height:"100vh",background:"#F5F0E8",fontFamily:"Georgia,'Times New Roman',serif",color:"#2C2418",overflow:"hidden"},
+  sidebar:{width:224,background:"#221C12",color:"#E8D5B7",display:"flex",flexDirection:"column",padding:"24px 0",flexShrink:0},
+  brand:{display:"flex",alignItems:"center",gap:10,padding:"0 20px 24px",borderBottom:"1px solid #3A2E1E"},
+  bMark:{fontSize:22,color:"#C4784A"},bName:{fontSize:16,fontWeight:"bold",letterSpacing:1},
+  nav:{padding:"16px 0",borderBottom:"1px solid #3A2E1E"},
+  navBtn:{display:"flex",alignItems:"center",gap:8,width:"100%",textAlign:"left",padding:"10px 20px",background:"none",border:"none",color:"#9A8060",cursor:"pointer",fontSize:14,fontFamily:"inherit"},
+  navOn:{color:"#E8D5B7",background:"#3A2E1E"},
+  badge:{marginLeft:"auto",background:"#C4784A",color:"#fff",borderRadius:10,fontSize:11,padding:"1px 6px"},
+  sLabel:{padding:"20px 20px 6px",fontSize:10,letterSpacing:2,color:"#5A4A30",fontFamily:"sans-serif"},
+  sScroll:{flex:1,overflowY:"auto",padding:"4px 0"},
+  sItem:{display:"flex",alignItems:"center",gap:8,width:"100%",textAlign:"left",padding:"9px 20px",background:"none",border:"none",borderLeft:"3px solid transparent",color:"#9A8060",cursor:"pointer",fontSize:13,fontFamily:"inherit"},
+  sItemOn:{color:"#E8D5B7",background:"#3A2E1E"},
+  sName:{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
+  sAddBtn:{margin:"8px 16px 0",padding:"9px 12px",background:"none",border:"1px solid #3A2E1E",color:"#6A5530",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",textAlign:"center"},
+  sDlBtn:{margin:"8px 16px 16px",padding:"9px 12px",background:"rgba(196,120,74,.12)",border:"1px solid rgba(196,120,74,.35)",color:"#C4784A",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",textAlign:"center"},
+  main:{flex:1,overflowY:"auto"},
+  page:{maxWidth:700,margin:"0 auto",padding:"40px 40px 100px"},
+  pageHead:{marginBottom:28},
+  h1:{fontSize:30,fontWeight:"normal",color:"#2C2418",marginBottom:6,letterSpacing:-.5},
+  sub:{fontSize:14,color:"#7A6548",lineHeight:1.6},
+  back:{background:"none",border:"none",color:"#8B7355",cursor:"pointer",fontSize:13,padding:0,fontFamily:"inherit",marginBottom:20,opacity:.8},
+  label:{fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#A89070",marginBottom:10,fontWeight:"normal",display:"block"},
+  stack:{display:"flex",flexDirection:"column",gap:12},
+  card:{background:"#fff",borderRadius:10,padding:"18px 20px",boxShadow:"0 2px 12px rgba(44,36,24,.06)"},
+  dl:{fontSize:11,fontWeight:"bold",padding:"3px 8px",borderRadius:20},
+  bar:{height:6,background:"#F0E8D8",borderRadius:4,overflow:"hidden"},
+  barFill:{height:"100%",borderRadius:4,transition:"width .4s"},
+  grid:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:16},
+  projCard:{borderRadius:14,padding:"22px 20px",cursor:"pointer"},
+  projCardAdd:{borderRadius:14,padding:"22px 20px",border:"2px dashed #C4B5A0",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#A89070",gap:8,minHeight:140},
+  taskRow:{display:"flex",alignItems:"center",gap:10,padding:"14px 16px",background:"#fff",borderRadius:10,marginBottom:8,boxShadow:"0 1px 6px rgba(44,36,24,.05)"},
+  addRowBtn:{width:"100%",marginTop:12,padding:"12px",background:"none",border:"2px dashed #C4B5A0",borderRadius:10,color:"#A89070",cursor:"pointer",fontSize:13,fontFamily:"inherit"},
+  statusBtn:{padding:"7px 14px",borderRadius:20,cursor:"pointer",fontSize:12,fontFamily:"inherit",background:"transparent",color:"#8B7355",border:"2px solid #C4B5A0",transition:"all .15s"},
+  dateInput:{padding:"7px 10px",border:"1.5px solid #D8CCBA",borderRadius:8,fontSize:13,fontFamily:"inherit",background:"#fff",color:"#2C2418",outline:"none"},
+  addSubInput:{flex:1,padding:"10px 14px",border:"1.5px solid #D8CCBA",borderRadius:8,fontSize:14,fontFamily:"inherit",background:"#fff",color:"#2C2418",outline:"none"},
+  restoreBtn:{background:"none",border:"1px solid #C4B5A0",borderRadius:6,color:"#8B7355",padding:"4px 10px",cursor:"pointer",fontSize:12,fontFamily:"inherit"},
+  dangerBtn:{padding:"10px 18px",background:"none",border:"1.5px solid #C0392B",borderRadius:8,color:"#C0392B",cursor:"pointer",fontSize:13,fontFamily:"inherit"},
+  btnPrimary:{padding:"8px 16px",border:"none",borderRadius:7,cursor:"pointer",fontSize:13,color:"#fff",fontFamily:"inherit"},
+  btnGhost:{padding:"8px 14px",background:"none",border:"1.5px solid #C4B5A0",borderRadius:7,color:"#8B7355",cursor:"pointer",fontSize:13,fontFamily:"inherit"},
+  overlay:{position:"fixed",inset:0,background:"rgba(34,28,18,.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100},
+  modal:{background:"#FAF5EC",borderRadius:16,padding:32,width:420,maxWidth:"90vw",boxShadow:"0 20px 60px rgba(34,28,18,.3)"},
+  modalTitle:{fontSize:22,marginBottom:20,fontWeight:"normal",color:"#2C2418"},
+  input:{width:"100%",padding:"11px 14px",border:"1.5px solid #D8CCBA",borderRadius:8,fontSize:15,fontFamily:"inherit",background:"#fff",color:"#2C2418",marginBottom:12,boxSizing:"border-box",outline:"none"},
+  textarea:{width:"100%",padding:"11px 14px",border:"1.5px solid #D8CCBA",borderRadius:8,fontSize:15,fontFamily:"inherit",background:"#fff",color:"#2C2418",marginBottom:16,boxSizing:"border-box",outline:"none",resize:"vertical",minHeight:80},
+  cancelBtn:{padding:"10px 20px",background:"none",border:"1.5px solid #C4B5A0",borderRadius:8,color:"#8B7355",cursor:"pointer",fontSize:14,fontFamily:"inherit"},
+  confirmBtn:{padding:"10px 20px",border:"none",borderRadius:8,color:"#fff",cursor:"pointer",fontSize:14,fontFamily:"inherit"},
+  empty:{textAlign:"center",padding:"60px 20px"},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
